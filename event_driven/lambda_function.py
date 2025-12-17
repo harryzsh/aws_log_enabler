@@ -84,7 +84,8 @@ def extract_event_details(event):
         
         if logging.get('enabled'):
             result['service_type'] = 'cloudfront'
-            result['resource_arn'] = detail['responseElements']['distribution']['arn']
+            # CloudFront uses 'aRN' not 'arn' in responseElements
+            result['resource_arn'] = detail['responseElements'].get('aRN') or detail['responseElements']['distribution'].get('aRN')
             result['resource_name'] = detail['responseElements']['distribution']['id']
             result['bucket_name'] = logging.get('bucket', '').replace('.s3.amazonaws.com', '')
             result['prefix'] = logging.get('prefix', '')
