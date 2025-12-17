@@ -1,0 +1,12 @@
+# Event-Driven Log Enabler Configuration
+
+# Central region where Lambda will be deployed
+central_region: us-east-1
+
+# Source regions to monitor for logging enablement
+source_regions:
+  - us-east-1
+
+# SNS notification (optional)
+enable_sns_notifications: false
+notification_email: your-email@example.com
