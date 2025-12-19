@@ -7,6 +7,10 @@ This script:
 2. Enables logging on AWS resources
 3. Creates Athena databases and tables for querying logs
 
+Authentication:
+- Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables for AKSK
+- Or use default AWS credentials from ~/.aws/credentials or IAM roles
+
 Note: CloudFront distributions with VPC origins cannot be updated via API.
       Enable logging manually in the console for those distributions.
 """
@@ -14,7 +18,27 @@ import boto3
 import sys
 import time
 import yaml
+import os
 from pathlib import Path
+
+# AWS Credentials Configuration
+# Option 1: Set environment variables AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+# Option 2: Set credentials directly in code below (not recommended for production)
+AWS_ACCESS_KEY_ID = None  # Set your access key here if not using environment variables
+AWS_SECRET_ACCESS_KEY = None  # Set your secret key here if not using environment variables
+AWS_SESSION_TOKEN = None  # Optional: Set session token for temporary credentials
+
+# Configure boto3 session with AKSK
+access_key = os.environ.get('AWS_ACCESS_KEY_ID') or AWS_ACCESS_KEY_ID
+secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY') or AWS_SECRET_ACCESS_KEY
+session_token = os.environ.get('AWS_SESSION_TOKEN') or AWS_SESSION_TOKEN
+
+if access_key and secret_key:
+    boto3.setup_default_session(
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        aws_session_token=session_token
+    )
 
 # ANSI color codes
 RED = '\033[91m'

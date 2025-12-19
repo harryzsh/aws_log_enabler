@@ -5,10 +5,219 @@ Automates enabling logging for CloudFront, ALB, and WAF to S3, then configures A
 ## Prerequisites
 
 - Python 3.6+
+- AWS credentials configured (see AWS Authentication below)
+- IAM permissions (see Required Permissions below)
+
+## AWS Authentication
+
+The script supports multiple authentication methods:
+
+### Option 1: Environment Variables (Recommended)
+Set AWS credentials as environment variables:
+
+```bash
+# For permanent credentials
+export AWS_ACCESS_KEY_ID= AK
+export AWS_SECRET_ACCESS_KEY= SK
+
+# For temporary credentials (optional)
+export AWS_SESSION_TOKEN=Session_Token...
+
+# Run the script
+python setup_aws_logging.py resources.yaml
+```
+
+### Option 2: Direct Code Configuration
+Edit the script and set credentials directly in the code:
+
+```python
+# In setup_aws_logging.py, modify these lines:
+AWS_ACCESS_KEY_ID = "AK"
+AWS_SECRET_ACCESS_KEY = "SK"
+AWS_SESSION_TOKEN = None  # Optional for temporary credentials
+```
+
+**⚠️ Security Note**: Option 2 is not recommended for production environments as it stores credentials in code.
+
+### Option 3: Default AWS Credentials
+If no AKSK is provided, the script falls back to standard AWS credential sources:
+- AWS credentials file (`~/.aws/credentials`)
+- IAM roles (for EC2 instances)
+- AWS CLI configuration (`aws configure`)
+
+### Credential Priority
+The script checks credentials in this order:
+1. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+2. Direct code configuration (if set in script)
+3. Default AWS credentials (IAM roles, `~/.aws/credentials`, etc.)
+
+## Required Permissions
+
+The user/role running this script needs the following IAM permissions:
+
+### Core AWS Services
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+### S3 Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "s3:CreateBucket",
+    "s3:HeadBucket",
+    "s3:PutBucketOwnershipControls",
+    "s3:PutBucketAcl",
+    "s3:PutBucketPolicy"
+  ],
+  "Resource": [
+    "arn:aws:s3:::cloudfront-logs-*",
+    "arn:aws:s3:::alb-logs-*",
+    "arn:aws:s3:::aws-waf-logs-*"
+  ]
+}
+```
+
+### CloudFront Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "cloudfront:GetDistribution",
+    "cloudfront:UpdateDistribution"
+  ],
+  "Resource": "*"
+}
+```
+
+### ALB Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "elasticloadbalancing:DescribeLoadBalancerAttributes",
+    "elasticloadbalancing:ModifyLoadBalancerAttributes"
+  ],
+  "Resource": "*"
+}
+```
+
+### WAF Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "wafv2:GetLoggingConfiguration",
+    "wafv2:PutLoggingConfiguration"
+  ],
+  "Resource": "*"
+}
+```
+
+### Glue Catalog Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "glue:CreateDatabase",
+    "glue:GetDatabase",
+    "glue:CreateTable",
+    "glue:GetTable"
+  ],
+  "Resource": [
+    "arn:aws:glue:*:*:catalog",
+    "arn:aws:glue:*:*:database/*",
+    "arn:aws:glue:*:*:table/*/*"
+  ]
+}
+```
+
+### Athena Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "athena:StartQueryExecution",
+    "athena:GetQueryExecution"
+  ],
+  "Resource": "*"
+}
+```
+
+### Complete IAM Policy Example
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity",
+        "s3:CreateBucket",
+        "s3:HeadBucket",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutBucketAcl",
+        "s3:PutBucketPolicy",
+        "cloudfront:GetDistribution",
+        "cloudfront:UpdateDistribution",
+        "elasticloadbalancing:DescribeLoadBalancerAttributes",
+        "elasticloadbalancing:ModifyLoadBalancerAttributes",
+        "wafv2:GetLoggingConfiguration",
+        "wafv2:PutLoggingConfiguration",
+        "glue:CreateDatabase",
+        "glue:GetDatabase",
+        "glue:CreateTable",
+        "glue:GetTable",
+        "athena:StartQueryExecution",
+        "athena:GetQueryExecution"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:HeadBucket",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutBucketAcl",
+        "s3:PutBucketPolicy"
+      ],
+      "Resource": [
+        "arn:aws:s3:::cloudfront-logs-*",
+        "arn:aws:s3:::alb-logs-*",
+        "arn:aws:s3:::aws-waf-logs-*"
+      ]
+    }
+  ]
+}
+```
+
+**Note**: Some permissions use `"Resource": "*"` because AWS services like CloudFront, ALB, and WAF don't support resource-level permissions for these specific actions.
+
+## Installation
+
+Install dependencies using pip:
+
+```bash
+pip install -r requirements.txt
+```
+
+Or install manually:
 - boto3: `pip install boto3`
 - PyYAML: `pip install pyyaml`
-- AWS credentials configured
-- IAM permissions for the target service, S3, Glue, and Athena
 
 ## Quick Start
 

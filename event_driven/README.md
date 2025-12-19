@@ -187,6 +187,24 @@ ALB Logging Enabled (us-east-1)
 ✅ **Event-Driven** - Responds immediately when logging is enabled
 ✅ **Region-Aware** - Creates Glue catalogs in the correct source region
 
+## Prerequisites
+
+- Python 3.6+
+- AWS credentials configured
+- IAM permissions for Lambda, EventBridge, Glue, and Athena
+
+## Installation
+
+Install dependencies using pip:
+
+```bash
+pip install -r requirements.txt
+```
+
+Or install manually:
+- boto3: `pip install boto3`
+- PyYAML: `pip install pyyaml`
+
 ## Quick Start
 
 ### 1. Configure Regions
