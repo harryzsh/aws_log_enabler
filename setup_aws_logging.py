@@ -509,35 +509,8 @@ if __name__ == '__main__':
         
         sys.exit(0)
     
-    # Original command-line mode
-    if len(sys.argv) < 4 or len(sys.argv) > 5:
-        print("Usage:")
-        print("  1. YAML config mode: python setup_aws_logging.py <config.yaml>")
-        print("  2. Single resource mode: python setup_aws_logging.py <service_type> <resource_id_or_arn> <region> [--partition]")
-        print("\nservice_type: cloudfront, alb, or waf")
-        print("--partition: Optional flag to enable table partitioning")
-        sys.exit(1)
-    
-    service_type = sys.argv[1].lower()
-    resource_id = sys.argv[2]
-    region = sys.argv[3]
-    enable_partition = '--partition' in sys.argv
-    
-    account_id = boto3.client('sts').get_caller_identity()['Account']
-    bucket_name = f'aws-waf-logs-{account_id}' if service_type == 'waf' else f'{service_type}-logs-{account_id}'
-    
-    s3 = boto3.client('s3', region_name=region)
-    create_s3_bucket(s3, bucket_name, region, service_type)
-    
-    if service_type == 'cloudfront':
-        prefix, resource_name = setup_cloudfront_logging(resource_id, bucket_name, region)
-    elif service_type == 'alb':
-        prefix, resource_name = setup_alb_logging(resource_id, bucket_name, region)
-    elif service_type == 'waf':
-        prefix, resource_name = setup_waf_logging(resource_id, bucket_name, region)
-    else:
-        print(f"Unknown service type: {service_type}")
-        sys.exit(1)
-    
-    setup_athena(bucket_name, prefix, service_type, region, resource_name, enable_partition)
-    print(f"\nSetup complete! Logs will be stored in s3://{bucket_name}/{prefix}")
+    # If we get here, invalid arguments
+    print("Usage: python setup_aws_logging.py <config.yaml>")
+    print("\nExample: python setup_aws_logging.py resources.yaml")
+    sys.exit(1)
+

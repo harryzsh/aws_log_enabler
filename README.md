@@ -222,8 +222,16 @@ Or install manually:
 ## Quick Start
 
 1. Edit `resources.yaml` with your resources
-2. Run: `python3 setup_aws_logging.py resources.yaml`
+2. Run: `python setup_aws_logging.py resources.yaml`
 3. Query logs in Athena console after 5-15 minutes
+
+## Usage
+
+```bash
+python setup_aws_logging.py resources.yaml
+```
+
+The script processes all resources defined in the YAML configuration file.
 
 ## Configuration
 
@@ -246,7 +254,6 @@ cloudfront:
 ```yaml
 alb:
   - arn: arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/abc123
-    region: us-east-1
     logs:
       access: true       # HTTP request logs (default: true)
       connection: false  # TLS connection logs (default: false)
@@ -265,7 +272,6 @@ alb:
 ```yaml
 waf:
   - arn: arn:aws:wafv2:us-east-1:123456789012:regional/webacl/my-waf/abc-123
-    region: us-east-1
 ```
 
 **Notes:**
