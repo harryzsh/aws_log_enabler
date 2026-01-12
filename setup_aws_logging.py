@@ -271,9 +271,9 @@ def setup_bedrock_logging(region, bucket_name):
     
     Note: Bedrock logs are stored at: {bucket}/AWSLogs/{account}/BedrockModelInvocationLogs/{region}/
     Logs are in JSON format with hourly partitioning.
-    Unlike ALB/WAF, Bedrock does not require S3 bucket policy - it writes directly.
     """
     bedrock = boto3.client('bedrock', region_name=region)
+    s3 = boto3.client('s3', region_name=region)
     account_id = boto3.client('sts').get_caller_identity()['Account']
     
     # Check if logging is already enabled
@@ -290,7 +290,27 @@ def setup_bedrock_logging(region, bucket_name):
     except Exception:
         pass
     
-    # Enable Bedrock logging (no bucket policy needed - Bedrock writes directly)
+    # Set bucket policy for Bedrock
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "bedrock.amazonaws.com"},
+            "Action": "s3:PutObject",
+            "Resource": f"arn:aws:s3:::{bucket_name}/AWSLogs/{account_id}/BedrockModelInvocationLogs/*",
+            "Condition": {
+                "StringEquals": {
+                    "aws:SourceAccount": account_id
+                },
+                "ArnLike": {
+                    "aws:SourceArn": f"arn:aws:bedrock:{region}:{account_id}:*"
+                }
+            }
+        }]
+    }
+    s3.put_bucket_policy(Bucket=bucket_name, Policy=str(policy).replace("'", '"'))
+    
+    # Enable Bedrock logging
     bedrock.put_model_invocation_logging_configuration(
         loggingConfig={
             's3Config': {

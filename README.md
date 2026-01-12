@@ -312,7 +312,6 @@ bedrock:
 - Includes input/output tokens, latency metrics, and full request/response data
 - S3 bucket created in the same region as Bedrock
 - Athena table uses partition projection for efficient querying
-- No S3 bucket policy required (Bedrock writes directly to S3)
 
 ## S3 Bucket Naming
 
@@ -465,7 +464,6 @@ ORDER BY invocation_count DESC;
 - **Data types**: Captures text, image, video, and embedding data (all enabled by default)
 - **Partition projection**: Uses hourly partitioning with automatic date range projection
 - **Query performance**: Partition projection eliminates need for manual partition management
-- **No bucket policy needed**: Unlike ALB/WAF, Bedrock writes directly to S3 without requiring bucket policies
 
 ### Multi-Region Deployments
 - Each region gets its own S3 bucket (e.g., `alb-logs-{account}-us-east-1`, `alb-logs-{account}-ap-southeast-2`)
