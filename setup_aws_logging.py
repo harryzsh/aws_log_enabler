@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AWS Log Enabler - Automates logging setup for CloudFront, ALB, and WAF
+AWS Log Enabler - Automates logging setup for CloudFront, ALB, WAF, and Bedrock
 
 This script:
 1. Creates S3 buckets with proper permissions for log delivery
@@ -265,6 +265,48 @@ def setup_waf_logging(resource_arn, bucket_name, region):
     print(f"S3 location: s3://{bucket_name}/AWSLogs/")
     return '', waf_name
 
+def setup_bedrock_logging(region, bucket_name):
+    """
+    Enable Bedrock model invocation logging to S3.
+    
+    Note: Bedrock logs are stored at: {bucket}/AWSLogs/{account}/BedrockModelInvocationLogs/{region}/
+    Logs are in JSON format with hourly partitioning.
+    Unlike ALB/WAF, Bedrock does not require S3 bucket policy - it writes directly.
+    """
+    bedrock = boto3.client('bedrock', region_name=region)
+    account_id = boto3.client('sts').get_caller_identity()['Account']
+    
+    # Check if logging is already enabled
+    try:
+        current_config = bedrock.get_model_invocation_logging_configuration()
+        logging_config = current_config.get('loggingConfig', {})
+        
+        # Check if S3 logging is enabled to our bucket
+        s3_config = logging_config.get('s3Config', {})
+        if s3_config.get('bucketName') == bucket_name:
+            print(f"Bedrock logging {RED}already{RESET} enabled in {region}")
+            print(f"S3 location: s3://{bucket_name}/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/")
+            return region
+    except Exception:
+        pass
+    
+    # Enable Bedrock logging (no bucket policy needed - Bedrock writes directly)
+    bedrock.put_model_invocation_logging_configuration(
+        loggingConfig={
+            's3Config': {
+                'bucketName': bucket_name
+            },
+            'textDataDeliveryEnabled': True,
+            'imageDataDeliveryEnabled': True,
+            'embeddingDataDeliveryEnabled': True,
+            'videoDataDeliveryEnabled': True
+        }
+    )
+    
+    print(f"Enabled Bedrock logging in {region}")
+    print(f"S3 location: s3://{bucket_name}/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/")
+    return region
+
 def setup_athena(bucket_name, prefix, service_type, region, resource_name):
     """
     Create Athena database and table for querying logs.
@@ -275,12 +317,14 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name):
     - ALB connection: alb_connection_logs_db
     - ALB health: alb_health_logs_db
     - WAF: acl_traffic_logs_db
+    - Bedrock: bedrock_logs_db
     
-    Note: Partitioning is not supported by this script.
+    Note: Partitioning is not supported by this script except for Bedrock.
           Use CloudFront Standard Logging v2 for partition support.
     """
     athena = boto3.client('athena', region_name=region)
     glue = boto3.client('glue', region_name=region)
+    account_id = boto3.client('sts').get_caller_identity()['Account']
     
     # Map service types to database names
     db_name_map = {
@@ -288,7 +332,8 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name):
         'alb': 'alb_access_logs_db',
         'alb_connection': 'alb_connection_logs_db',
         'alb_health': 'alb_health_logs_db',
-        'waf': 'acl_traffic_logs_db'
+        'waf': 'acl_traffic_logs_db',
+        'bedrock': 'bedrock_invocation_logs_db'
     }
     
     db_name = db_name_map.get(service_type, f'{service_type}_logs_db')
@@ -327,7 +372,9 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name):
     elif service_type == 'alb':
         create_table = f"""
         CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (
-          type STRING, time STRING, elb STRING, client_ip STRING, client_port INT,
+          type ST
+          
+          RING, time STRING, elb STRING, client_ip STRING, client_port INT,
           target_ip STRING, target_port INT, request_processing_time DOUBLE,
           target_processing_time DOUBLE, response_processing_time DOUBLE,
           elb_status_code STRING, target_status_code STRING, received_bytes BIGINT,
@@ -365,6 +412,54 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name):
         ROW FORMAT DELIMITED FIELDS TERMINATED BY ' '
         LOCATION 's3://{bucket_name}/{prefix}'
         TBLPROPERTIES ('skip.header.line.count'='2');
+        """
+    elif service_type == 'bedrock':
+        create_table = f"""
+        CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (
+          schemaType STRING,
+          timestamp TIMESTAMP,
+          region STRING,
+          identity STRUCT<arn: STRING>,
+          operation STRING,
+          modelId STRING,
+          requestId STRING,
+          schemaVersion STRING,
+          output STRUCT<
+            outputTokenCount: INT,
+            outputBodyJson: STRUCT<
+              metrics: STRUCT<latencyMs: INT>,
+              usage: STRUCT<inputTokens: INT, outputTokens: INT, totalTokens: INT>,
+              output: STRUCT<
+                message: STRUCT<
+                  role: STRING,
+                  content: ARRAY<STRUCT<text: STRING>>
+                >
+              >
+            >
+          >,
+          input STRUCT<
+            inputTokenCount: INT,
+            inputBodyJson: STRUCT<
+              messages: ARRAY<STRUCT<role: STRING, content: ARRAY<STRUCT<text: STRING>>>>,
+              system: ARRAY<STRUCT<text: STRING>>,
+              inferenceConfig: STRUCT<maxTokens: INT, temperature: DOUBLE, topP: DOUBLE>,
+              additionalModelRequestFields: STRUCT<top_k: INT>
+            >
+          >
+        )
+        PARTITIONED BY (datehour STRING)
+        ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
+        WITH SERDEPROPERTIES ('serialization.format' = '1')
+        LOCATION 's3://{bucket_name}/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/'
+        TBLPROPERTIES (
+          "projection.enabled" = "true",
+          "projection.datehour.type" = "date",
+          "projection.datehour.range" = "2026/01/09/00,NOW",
+          "projection.datehour.format" = "yyyy/MM/dd/HH",
+          "projection.datehour.interval" = "1",
+          "projection.datehour.interval.unit" = "HOURS",
+          "storage.location.template" = "s3://{bucket_name}/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/${{datehour}}"
+        );
         """
     else:  # waf
         create_table = f"""
@@ -481,6 +576,24 @@ def process_yaml_config(yaml_file):
         except Exception as e:
             results['failed'].append(f"WAF {arn}: {str(e)}")
             print(f"✗ WAF {arn} failed: {e}\n")
+    
+    # Process Bedrock regions
+    for bedrock_config in config.get('bedrock', []):
+        try:
+            region = bedrock_config['region']
+            
+            bucket_name = f'bedrock-invocation-logs-{account_id}-{region}'
+            s3 = boto3.client('s3', region_name=region)
+            create_s3_bucket(s3, bucket_name, region, 'bedrock')
+            
+            resource_name = setup_bedrock_logging(region, bucket_name)
+            setup_athena(bucket_name, '', 'bedrock', region, 'invocation_logs')
+            
+            results['success'].append(f"Bedrock {region}")
+            print(f"✓ Bedrock {region} completed\n")
+        except Exception as e:
+            results['failed'].append(f"Bedrock {region}: {str(e)}")
+            print(f"✗ Bedrock {region} failed: {e}\n")
     
     return results
 

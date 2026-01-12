@@ -1,6 +1,6 @@
 # AWS Log Enabler
 
-Automates enabling logging for CloudFront, ALB, and WAF to S3, then configures Athena for querying.
+Automates enabling logging for CloudFront, ALB, WAF, and Bedrock to S3, then configures Athena for querying.
 
 ## Prerequisites
 
@@ -126,6 +126,18 @@ The user/role running this script needs the following IAM permissions:
 }
 ```
 
+### Bedrock Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "bedrock:GetModelInvocationLoggingConfiguration",
+    "bedrock:PutModelInvocationLoggingConfiguration"
+  ],
+  "Resource": "*"
+}
+```
+
 ### Glue Catalog Permissions
 ```json
 {
@@ -177,6 +189,8 @@ The user/role running this script needs the following IAM permissions:
         "elasticloadbalancing:ModifyLoadBalancerAttributes",
         "wafv2:GetLoggingConfiguration",
         "wafv2:PutLoggingConfiguration",
+        "bedrock:GetModelInvocationLoggingConfiguration",
+        "bedrock:PutModelInvocationLoggingConfiguration",
         "glue:CreateDatabase",
         "glue:GetDatabase",
         "glue:CreateTable",
@@ -198,7 +212,8 @@ The user/role running this script needs the following IAM permissions:
       "Resource": [
         "arn:aws:s3:::cloudfront-logs-*",
         "arn:aws:s3:::alb-logs-*",
-        "arn:aws:s3:::aws-waf-logs-*"
+        "arn:aws:s3:::aws-waf-logs-*",
+        "arn:aws:s3:::bedrock-invocation-logs-*"
       ]
     }
   ]
@@ -272,6 +287,7 @@ alb:
 ```yaml
 waf:
   - arn: arn:aws:wafv2:us-east-1:123456789012:regional/webacl/my-waf/abc-123
+    region: us-east-1
 ```
 
 **Notes:**
@@ -280,12 +296,31 @@ waf:
 - Partitioning is automatically disabled (not supported)
 - Bucket name must start with `aws-waf-logs-` (enforced by AWS)
 
+### Bedrock
+
+```yaml
+bedrock:
+  - region: ap-southeast-2
+  - region: us-east-1
+```
+
+**Notes:**
+- Enables model invocation logging for all Bedrock models in the specified region
+- Logs appear within minutes of model invocations
+- Stored in JSON format with hourly partitioning
+- Captures text, image, video, and embedding model invocations
+- Includes input/output tokens, latency metrics, and full request/response data
+- S3 bucket created in the same region as Bedrock
+- Athena table uses partition projection for efficient querying
+- No S3 bucket policy required (Bedrock writes directly to S3)
+
 ## S3 Bucket Naming
 
 Buckets are created with region suffix to support multi-region deployments:
 - CloudFront: `cloudfront-logs-{account-id}-us-east-1`
 - ALB: `alb-logs-{account-id}-{region}`
 - WAF: `aws-waf-logs-{account-id}-{region}`
+- Bedrock: `bedrock-invocation-logs-{account-id}-{region}`
 
 ### Multi-Resource Sharing
 
@@ -311,6 +346,7 @@ The script creates separate databases for each log type:
 - `alb_connection_logs_db` - ALB connection logs
 - `alb_health_logs_db` - ALB health check logs
 - `acl_traffic_logs_db` - WAF traffic logs
+- `bedrock_invocation_logs_db` - Bedrock model invocation logs
 
 ## Query Examples
 
@@ -343,6 +379,59 @@ WHERE action = 'BLOCK'
 LIMIT 100;
 ```
 
+### Bedrock Logs
+```sql
+-- Query recent invocations with token usage
+SELECT 
+  timestamp,
+  modelId,
+  operation,
+  input.inputTokenCount as input_tokens,
+  output.outputTokenCount as output_tokens,
+  output.outputBodyJson.metrics.latencyMs as latency_ms
+FROM bedrock_invocation_logs_db.bedrock_invocation_logs
+WHERE datehour >= '2026/01/12/00'
+ORDER BY timestamp DESC
+LIMIT 100;
+
+-- Extract conversation details (system prompt, user input, assistant output)
+SELECT
+  timestamp,
+  input.inputBodyJson.system[1].text as system_prompt,
+  input.inputBodyJson.messages[1].content[1].text as user_input,
+  output.outputBodyJson.output.message.content[1].text as assistant_output,
+  output.outputBodyJson.metrics.latencyMs as latency_ms,
+  input.inputTokenCount as input_tokens,
+  output.outputTokenCount as output_tokens
+FROM bedrock_invocation_logs_db.bedrock_invocation_logs
+WHERE datehour >= '2026/01/12/00'
+ORDER BY timestamp DESC
+LIMIT 100;
+
+-- Find high-latency requests
+SELECT 
+  timestamp,
+  modelId,
+  output.outputBodyJson.metrics.latencyMs as latency_ms,
+  requestId
+FROM bedrock_invocation_logs_db.bedrock_invocation_logs
+WHERE datehour >= '2026/01/12/00'
+  AND output.outputBodyJson.metrics.latencyMs > 5000
+ORDER BY latency_ms DESC;
+
+-- Analyze token usage by model
+SELECT 
+  modelId,
+  COUNT(*) as invocation_count,
+  SUM(input.inputTokenCount) as total_input_tokens,
+  SUM(output.outputTokenCount) as total_output_tokens,
+  AVG(output.outputBodyJson.metrics.latencyMs) as avg_latency_ms
+FROM bedrock_invocation_logs_db.bedrock_invocation_logs
+WHERE datehour >= '2026/01/12/00'
+GROUP BY modelId
+ORDER BY invocation_count DESC;
+```
+
 ## Important Notes
 
 ### Script Behavior
@@ -370,6 +459,14 @@ LIMIT 100;
 - **Partitioning**: Not supported by this script
 - **Format**: JSON logs (different from CloudFront/ALB text format)
 
+### Bedrock Limitations
+- **Region-wide logging**: Enables logging for all Bedrock models in the region (cannot enable per-model)
+- **Log delay**: Logs appear within minutes of model invocations
+- **Data types**: Captures text, image, video, and embedding data (all enabled by default)
+- **Partition projection**: Uses hourly partitioning with automatic date range projection
+- **Query performance**: Partition projection eliminates need for manual partition management
+- **No bucket policy needed**: Unlike ALB/WAF, Bedrock writes directly to S3 without requiring bucket policies
+
 ### Multi-Region Deployments
 - Each region gets its own S3 bucket (e.g., `alb-logs-{account}-us-east-1`, `alb-logs-{account}-ap-southeast-2`)
 - Athena tables created in the same region as the resource
@@ -381,11 +478,13 @@ LIMIT 100;
 - **Athena queries**: $5 per TB scanned
 - **Data transfer**: Free within same region
 - **Cross-region**: $0.02/GB if querying from different region
+- **Bedrock logging**: No additional charge for logging, only S3 storage and Athena query costs
 
 ## Troubleshooting
 
 ### No logs appearing
 - Wait 5-15 minutes for CloudFront, up to 60 minutes for ALB
+- For Bedrock, logs appear within minutes after model invocations
 - Check S3 bucket for test files (indicates permissions are correct)
 - Verify logging is enabled: check resource configuration
 
@@ -393,6 +492,7 @@ LIMIT 100;
 - Verify S3 location has trailing slash in table definition
 - Check if logs exist in S3: `aws s3 ls s3://{bucket}/{prefix}/`
 - Table names are lowercase - use lowercase in queries
+- For Bedrock: Ensure datehour partition is within the projection range
 
 ### VPC Origin Error
 - CloudFront distributions with VPC origins cannot be updated via API
@@ -416,9 +516,11 @@ aws glue delete-database --name alb_access_logs_db --region us-east-1
 aws glue delete-database --name alb_connection_logs_db --region us-east-1
 aws glue delete-database --name alb_health_logs_db --region us-east-1
 aws glue delete-database --name acl_traffic_logs_db --region us-east-1
+aws glue delete-database --name bedrock_invocation_logs_db --region {region}
 
 # Delete S3 buckets
 aws s3 rb s3://cloudfront-logs-{account}-us-east-1 --force
 aws s3 rb s3://alb-logs-{account}-{region} --force
 aws s3 rb s3://aws-waf-logs-{account}-{region} --force
+aws s3 rb s3://bedrock-invocation-logs-{account}-{region} --force
 ```

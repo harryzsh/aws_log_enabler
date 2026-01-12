@@ -1,16 +1,20 @@
 # AWS Resources Configuration for Log Enabler
-# Add your CloudFront distributions, ALBs, and WAF WebACLs here
+# Add your CloudFront distributions, ALBs, WAF WebACLs, and Bedrock regions here
 
 cloudfront:
   - distribution_id: E1TWPQP39I72KM
 
-alb:
-  - arn: arn:aws:elasticloadbalancing:us-east-1:476114114317:loadbalancer/app/k8s-dify-difydev-9a5ab6edcf/a4230823f3a22516
-    logs:
-      access: true
-      connection: false
-      health: false
+# alb:
+#   - arn: arn:aws:elasticloadbalancing:us-east-1:476114114317:loadbalancer/app/k8s-dify-difydev-9a5ab6edcf/a4230823f3a22516
+#     logs:
+#       access: true
+#       connection: false
+#       health: false
 
 waf:
   - arn: arn:aws:wafv2:us-east-1:476114114317:regional/webacl/k8s-dify-waf/693ae15b-2ed5-4b27-a9cc-522123398bdc
+
+bedrock:
+  - region: ap-southeast-2
+  # - region: us-east-1  # Add more regions as needed
 
