@@ -287,10 +287,10 @@ alb:
 ```yaml
 waf:
   - arn: arn:aws:wafv2:us-east-1:123456789012:regional/webacl/my-waf/abc-123
-    region: us-east-1
 ```
 
 **Notes:**
+- Region is automatically extracted from the ARN
 - Logs appear in 5 minutes
 - Stored in JSON format
 - Partitioning is automatically disabled (not supported)
