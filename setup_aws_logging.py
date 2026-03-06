@@ -497,6 +497,7 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name):
     output_location = f's3://{bucket_name}/athena-results/'
     result = athena.start_query_execution(
         QueryString=create_table,
+        QueryExecutionContext={'Database': db_name},
         ResultConfiguration={'OutputLocation': output_location}
     )
     
