@@ -392,9 +392,7 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name):
     elif service_type == 'alb':
         create_table = f"""
         CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (
-          type ST
-          
-          RING, time STRING, elb STRING, client_ip STRING, client_port INT,
+          type STRING, time STRING, elb STRING, client_ip STRING, client_port INT,
           target_ip STRING, target_port INT, request_processing_time DOUBLE,
           target_processing_time DOUBLE, response_processing_time DOUBLE,
           elb_status_code STRING, target_status_code STRING, received_bytes BIGINT,
