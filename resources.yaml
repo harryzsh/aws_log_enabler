@@ -14,7 +14,16 @@ cloudfront:
 waf:
   - arn: arn:aws:wafv2:us-east-1:476114114317:regional/webacl/k8s-dify-waf/693ae15b-2ed5-4b27-a9cc-522123398bdc
 
+# nlb:
+#   - arn: arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/net/my-nlb/abc123
+
 bedrock:
   - region: ap-southeast-2
   # - region: us-east-1  # Add more regions as needed
+
+vpc:
+  - vpc_id: vpc-0c7aef1e305ee6daa
+    region: ap-southeast-2
+  # - vpc_id: vpc-xxxxxxxx
+  #   region: us-east-1
 

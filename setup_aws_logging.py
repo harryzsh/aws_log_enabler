@@ -232,6 +232,55 @@ def setup_alb_logging(resource_arn, bucket_name, region, log_config=None):
     # Return log configuration for Athena table creation
     return f'{prefix}/', alb_name, {'access': enable_access, 'connection': enable_connection, 'health': enable_health}
 
+def setup_nlb_logging(resource_arn, bucket_name, region):
+    """
+    Enable NLB access logging to S3.
+    
+    Note: NLB logs are TLS-only - only created if the NLB has a TLS listener.
+    S3 path: {bucket}/AWSLogs/{account}/elasticloadbalancing/{region}/yyyy/mm/dd/
+    Uses same service principal as ALB: logdelivery.elasticloadbalancing.amazonaws.com
+    """
+    elb = boto3.client('elbv2', region_name=region)
+    s3 = boto3.client('s3', region_name=region)
+
+    # Extract NLB name from ARN
+    nlb_name = resource_arn.split('/')[-2]
+
+    # Check if logging is already enabled
+    current_attrs = elb.describe_load_balancer_attributes(LoadBalancerArn=resource_arn)
+    attrs_dict = {attr['Key']: attr['Value'] for attr in current_attrs['Attributes']}
+
+    if (attrs_dict.get('access_logs.s3.enabled') == 'true' and
+        attrs_dict.get('access_logs.s3.bucket') == bucket_name):
+        print(f"NLB logging {RED}already{RESET} enabled for {nlb_name}")
+        print(f"S3 location: s3://{bucket_name}/AWSLogs/")
+        return nlb_name
+
+    # Set bucket policy for NLB (same as ALB)
+    account_id = boto3.client('sts').get_caller_identity()['Account']
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "logdelivery.elasticloadbalancing.amazonaws.com"},
+            "Action": "s3:PutObject",
+            "Resource": f"arn:aws:s3:::{bucket_name}/AWSLogs/{account_id}/*"
+        }]
+    }
+    s3.put_bucket_policy(Bucket=bucket_name, Policy=str(policy).replace("'", '"'))
+
+    elb.modify_load_balancer_attributes(
+        LoadBalancerArn=resource_arn,
+        Attributes=[
+            {'Key': 'access_logs.s3.enabled', 'Value': 'true'},
+            {'Key': 'access_logs.s3.bucket', 'Value': bucket_name},
+        ]
+    )
+
+    print(f"Enabled NLB logging for {nlb_name}")
+    print(f"S3 location: s3://{bucket_name}/AWSLogs/")
+    return nlb_name
+
 def setup_waf_logging(resource_arn, bucket_name, region):
     """
     Enable WAF logging to S3.
@@ -264,6 +313,74 @@ def setup_waf_logging(resource_arn, bucket_name, region):
     print(f"Enabled WAF logging for {resource_arn}")
     print(f"S3 location: s3://{bucket_name}/AWSLogs/")
     return '', waf_name
+
+def setup_vpc_flow_logs(vpc_id, bucket_name, region):
+    """
+    Enable VPC Flow Logs to S3.
+    
+    S3 path: {bucket}/AWSLogs/{account}/vpcflowlogs/{region}/{yyyy}/{MM}/{dd}/
+    Captures all IP traffic (ACCEPT, REJECT) to/from network interfaces in the VPC.
+    """
+    ec2 = boto3.client('ec2', region_name=region)
+    s3 = boto3.client('s3', region_name=region)
+    account_id = boto3.client('sts').get_caller_identity()['Account']
+
+    # Check if flow logs already enabled for this VPC to this bucket
+    existing = ec2.describe_flow_logs(
+        Filters=[
+            {'Name': 'resource-id', 'Values': [vpc_id]},
+            {'Name': 'log-destination-type', 'Values': ['s3']}
+        ]
+    )
+    for fl in existing.get('FlowLogs', []):
+        if bucket_name in fl.get('LogDestination', ''):
+            print(f"VPC Flow Logs {RED}already{RESET} enabled for {vpc_id}")
+            print(f"S3 location: s3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/")
+            return vpc_id
+
+    # Set bucket policy for VPC Flow Logs
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": "delivery.logs.amazonaws.com"},
+                "Action": "s3:PutObject",
+                "Resource": f"arn:aws:s3:::{bucket_name}/AWSLogs/{account_id}/*",
+                "Condition": {
+                    "StringEquals": {
+                        "s3:x-amz-acl": "bucket-owner-full-control",
+                        "aws:SourceAccount": account_id
+                    }
+                }
+            },
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": "delivery.logs.amazonaws.com"},
+                "Action": "s3:GetBucketAcl",
+                "Resource": f"arn:aws:s3:::{bucket_name}",
+                "Condition": {
+                    "StringEquals": {"aws:SourceAccount": account_id}
+                }
+            }
+        ]
+    }
+    s3.put_bucket_policy(Bucket=bucket_name, Policy=str(policy).replace("'", '"'))
+
+    # Enable VPC Flow Logs
+    ec2.create_flow_logs(
+        ResourceIds=[vpc_id],
+        ResourceType='VPC',
+        TrafficType='ALL',
+        LogDestinationType='s3',
+        LogDestination=f'arn:aws:s3:::{bucket_name}',
+        LogFormat='${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status} ${vpc-id} ${subnet-id} ${instance-id} ${tcp-flags} ${type} ${pkt-srcaddr} ${pkt-dstaddr} ${az-id} ${sublocation-type} ${sublocation-id} ${pkt-src-aws-service} ${pkt-dst-aws-service} ${flow-direction} ${traffic-path}',
+        MaxAggregationInterval=600
+    )
+
+    print(f"Enabled VPC Flow Logs for {vpc_id}")
+    print(f"S3 location: s3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/")
+    return vpc_id
 
 def setup_bedrock_logging(region, bucket_name):
     """
@@ -327,7 +444,7 @@ def setup_bedrock_logging(region, bucket_name):
     print(f"S3 location: s3://{bucket_name}/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/")
     return region
 
-def setup_athena(bucket_name, prefix, service_type, region, resource_name):
+def setup_athena(bucket_name, prefix, service_type, region, resource_name, drop_and_recreate=False):
     """
     Create Athena database and table for querying logs.
     
@@ -353,7 +470,9 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name):
         'alb_connection': 'alb_connection_logs_db',
         'alb_health': 'alb_health_logs_db',
         'waf': 'acl_traffic_logs_db',
-        'bedrock': 'bedrock_invocation_logs_db'
+        'bedrock': 'bedrock_invocation_logs_db',
+        'nlb': 'nlb_access_logs_db',
+        'vpc': 'vpc_flow_logs_db'
     }
     
     db_name = db_name_map.get(service_type, f'{service_type}_logs_db')
@@ -431,9 +550,87 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name):
         LOCATION 's3://{bucket_name}/{prefix}'
         TBLPROPERTIES ('skip.header.line.count'='2');
         """
-    elif service_type == 'bedrock':
+    elif service_type == 'nlb':
+        create_table = f"""
+        CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (          type STRING,
+          version STRING,
+          time STRING,
+          elb STRING,
+          listener_id STRING,
+          client_ip STRING,
+          client_port INT,
+          target_ip STRING,
+          target_port INT,
+          tcp_connection_time_ms DOUBLE,
+          tls_handshake_time_ms DOUBLE,
+          received_bytes BIGINT,
+          sent_bytes BIGINT,
+          incoming_tls_alert INT,
+          cert_arn STRING,
+          certificate_serial STRING,
+          tls_cipher_suite STRING,
+          tls_protocol_version STRING,
+          tls_named_group STRING,
+          domain_name STRING,
+          alpn_fe_protocol STRING,
+          alpn_be_protocol STRING,
+          alpn_client_preference_list STRING,
+          tls_connection_creation_time STRING
+        )
+        ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.RegexSerDe'
+        WITH SERDEPROPERTIES (
+          'serialization.format' = '1',
+          'input.regex' = '([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*):([0-9]*) ([^ ]*):([0-9]*) ([-.0-9]*) ([-.0-9]*) ([-0-9]*) ([-0-9]*) ([-0-9]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ?([^ ]*)?( .*)?'
+        )
+        LOCATION 's3://{bucket_name}/AWSLogs/{account_id}/elasticloadbalancing/{region}/';
+        """
+    elif service_type == 'vpc':
         create_table = f"""
         CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (
+          version int,
+          account_id string,
+          interface_id string,
+          srcaddr string,
+          dstaddr string,
+          srcport int,
+          dstport int,
+          protocol bigint,
+          packets bigint,
+          bytes bigint,
+          start bigint,
+          `end` bigint,
+          action string,
+          log_status string,
+          vpc_id string,
+          subnet_id string,
+          instance_id string,
+          tcp_flags int,
+          type string,
+          pkt_srcaddr string,
+          pkt_dstaddr string,
+          az_id string,
+          sublocation_type string,
+          sublocation_id string,
+          pkt_src_aws_service string,
+          pkt_dst_aws_service string,
+          flow_direction string,
+          traffic_path int
+        )
+        PARTITIONED BY (day string)
+        ROW FORMAT DELIMITED
+        FIELDS TERMINATED BY ' '
+        LOCATION 's3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/'
+        TBLPROPERTIES (
+          "skip.header.line.count" = "1",
+          "projection.enabled" = "true",
+          "projection.day.type" = "date",
+          "projection.day.range" = "2026/01/01,NOW",
+          "projection.day.format" = "yyyy/MM/dd",
+          "storage.location.template" = "s3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/${{day}}"
+        );
+        """
+    elif service_type == 'bedrock':
+        create_table = f"""        CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (
           schemaType STRING,
           timestamp TIMESTAMP,
           region STRING,
@@ -492,6 +689,8 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name):
         LOCATION 's3://{bucket_name}/AWSLogs/';
         """
     
+    print(f"\nCreate table query:\n{create_table.strip()}\n")
+
     output_location = f's3://{bucket_name}/athena-results/'
     result = athena.start_query_execution(
         QueryString=create_table,
@@ -577,6 +776,25 @@ def process_yaml_config(yaml_file):
             results['failed'].append(f"ALB {arn}: {str(e)}")
             print(f"✗ ALB {arn} failed: {e}\n")
     
+    # Process NLBs
+    for nlb in config.get('nlb', []):
+        try:
+            arn = nlb['arn']
+            region = extract_region_from_arn(arn)
+
+            bucket_name = f'nlb-logs-{account_id}-{region}'
+            s3 = boto3.client('s3', region_name=region)
+            create_s3_bucket(s3, bucket_name, region, 'nlb')
+
+            resource_name = setup_nlb_logging(arn, bucket_name, region)
+            setup_athena(bucket_name, '', 'nlb', region, resource_name)
+
+            results['success'].append(f"NLB {resource_name}")
+            print(f"✓ NLB {resource_name} completed\n")
+        except Exception as e:
+            results['failed'].append(f"NLB {arn}: {str(e)}")
+            print(f"✗ NLB {arn} failed: {e}\n")
+
     # Process WAF WebACLs
     for waf in config.get('waf', []):
         try:
@@ -613,7 +831,26 @@ def process_yaml_config(yaml_file):
         except Exception as e:
             results['failed'].append(f"Bedrock {region}: {str(e)}")
             print(f"✗ Bedrock {region} failed: {e}\n")
-    
+
+    # Process VPC Flow Logs
+    for vpc_config in config.get('vpc', []):
+        try:
+            vpc_id = vpc_config['vpc_id']
+            region = vpc_config['region']
+
+            bucket_name = f'vpc-flow-logs-{account_id}-{region}'
+            s3 = boto3.client('s3', region_name=region)
+            create_s3_bucket(s3, bucket_name, region, 'vpc')
+
+            resource_name = setup_vpc_flow_logs(vpc_id, bucket_name, region)
+            setup_athena(bucket_name, '', 'vpc', region, vpc_id.replace('-', '_')[4:])
+
+            results['success'].append(f"VPC {vpc_id}")
+            print(f"✓ VPC {vpc_id} completed\n")
+        except Exception as e:
+            results['failed'].append(f"VPC {vpc_id}: {str(e)}")
+            print(f"✗ VPC {vpc_id} failed: {e}\n")
+
     return results
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 # AWS Log Enabler
 
-Automates enabling logging for CloudFront, ALB, WAF, and Bedrock to S3, then configures Athena for querying.
+Automates enabling logging for CloudFront, ALB, NLB, WAF, Bedrock, and VPC Flow Logs to S3, then configures Athena for querying.
 
 ## Prerequisites
 
@@ -109,6 +109,31 @@ The user/role running this script needs the following IAM permissions:
   "Action": [
     "elasticloadbalancing:DescribeLoadBalancerAttributes",
     "elasticloadbalancing:ModifyLoadBalancerAttributes"
+  ],
+  "Resource": "*"
+}
+```
+
+### NLB Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "elasticloadbalancing:DescribeLoadBalancerAttributes",
+    "elasticloadbalancing:ModifyLoadBalancerAttributes"
+  ],
+  "Resource": "*"
+}
+```
+
+### VPC Flow Logs Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "ec2:CreateFlowLogs",
+    "ec2:DescribeFlowLogs",
+    "logs:CreateLogDelivery"
   ],
   "Resource": "*"
 }
@@ -296,6 +321,19 @@ waf:
 - Partitioning is automatically disabled (not supported)
 - Bucket name must start with `aws-waf-logs-` (enforced by AWS)
 
+### Network Load Balancer (NLB)
+
+```yaml
+nlb:
+  - arn: arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/net/my-nlb/abc123
+```
+
+**Notes:**
+- NLB logs are **TLS-only** - only generated if the NLB has a TLS listener
+- TCP-only NLBs will not generate access logs
+- Logs appear every 5 minutes
+- S3 path: `{bucket}/AWSLogs/{account}/elasticloadbalancing/{region}/yyyy/mm/dd/`
+
 ### Bedrock
 
 ```yaml
@@ -303,7 +341,6 @@ bedrock:
   - region: ap-southeast-2
   - region: us-east-1
 ```
-
 **Notes:**
 - Enables model invocation logging for all Bedrock models in the specified region
 - Logs appear within minutes of model invocations
@@ -313,13 +350,30 @@ bedrock:
 - S3 bucket created in the same region as Bedrock
 - Athena table uses partition projection for efficient querying
 
+### VPC Flow Logs
+
+```yaml
+vpc:
+  - vpc_id: vpc-0c7aef1e305ee6daa
+    region: ap-southeast-2
+```
+
+**Notes:**
+- Captures **all IP traffic** (ACCEPT + REJECT) to/from all network interfaces in the VPC
+- Includes traffic to NLB, ALB, EC2 instances, and all other resources in the VPC
+- Logs appear within 10 minutes (600s aggregation interval)
+- Athena table uses daily partition projection for efficient querying
+- S3 path: `{bucket}/AWSLogs/{account}/vpcflowlogs/{region}/{yyyy}/{MM}/{dd}/`
+
 ## S3 Bucket Naming
 
 Buckets are created with region suffix to support multi-region deployments:
 - CloudFront: `cloudfront-logs-{account-id}-us-east-1`
 - ALB: `alb-logs-{account-id}-{region}`
+- NLB: `nlb-logs-{account-id}-{region}`
 - WAF: `aws-waf-logs-{account-id}-{region}`
 - Bedrock: `bedrock-invocation-logs-{account-id}-{region}`
+- VPC Flow Logs: `vpc-flow-logs-{account-id}-{region}`
 
 ### Multi-Resource Sharing
 
@@ -344,8 +398,10 @@ The script creates separate databases for each log type:
 - `alb_access_logs_db` - ALB access logs
 - `alb_connection_logs_db` - ALB connection logs
 - `alb_health_logs_db` - ALB health check logs
+- `nlb_access_logs_db` - NLB TLS access logs
 - `acl_traffic_logs_db` - WAF traffic logs
 - `bedrock_invocation_logs_db` - Bedrock model invocation logs
+- `vpc_flow_logs_db` - VPC Flow Logs
 
 ## Query Examples
 
@@ -378,6 +434,64 @@ WHERE action = 'BLOCK'
 LIMIT 100;
 ```
 
+### NLB Logs
+```sql
+-- Recent TLS connections
+SELECT * FROM nlb_access_logs_db.nlb_{nlb_name}
+ORDER BY time DESC
+LIMIT 100;
+
+-- TLS protocol version breakdown
+SELECT tls_protocol_version, COUNT(*) as connections
+FROM nlb_access_logs_db.nlb_{nlb_name}
+WHERE tls_protocol_version != '-'
+GROUP BY tls_protocol_version
+ORDER BY connections DESC;
+
+-- Slowest TLS handshakes
+SELECT time, client_ip, tls_handshake_time_ms, tls_protocol_version, tls_cipher_suite
+FROM nlb_access_logs_db.nlb_{nlb_name}
+ORDER BY tls_handshake_time_ms DESC
+LIMIT 10;
+```
+
+### VPC Flow Logs
+```sql
+-- Recent traffic
+SELECT * FROM vpc_flow_logs_db.vpc_{vpc_id}
+WHERE day >= '2026/01/01'
+ORDER BY start DESC
+LIMIT 100;
+
+-- Rejected traffic (security analysis)
+SELECT srcaddr, dstaddr, dstport, protocol, COUNT(*) as count
+FROM vpc_flow_logs_db.vpc_{vpc_id}
+WHERE action = 'REJECT'
+  AND day >= '2026/01/01'
+GROUP BY srcaddr, dstaddr, dstport, protocol
+ORDER BY count DESC
+LIMIT 20;
+
+-- Traffic to/from specific IPs on NLB port 80
+SELECT
+  to_iso8601(from_unixtime(start)) as time,
+  srcaddr, dstaddr, srcport, dstport, packets, bytes, action
+FROM vpc_flow_logs_db.vpc_{vpc_id}
+WHERE dstport = 80
+  AND (srcaddr = '189.0.1.229' OR dstaddr = '189.0.1.229'
+    OR srcaddr = '189.0.1.186' OR dstaddr = '189.0.1.186')
+  AND day >= '2026/01/12'
+ORDER BY start DESC
+LIMIT 100;
+
+-- Top talkers by bytes
+SELECT srcaddr, dstaddr, SUM(bytes) as total_bytes
+FROM vpc_flow_logs_db.vpc_{vpc_id}
+WHERE day >= '2026/01/01'
+GROUP BY srcaddr, dstaddr
+ORDER BY total_bytes DESC
+LIMIT 10;
+```
 ### Bedrock Logs
 ```sql
 -- Query recent invocations with token usage
@@ -513,12 +627,16 @@ aws glue delete-database --name cloudfront_access_logs_db --region us-east-1
 aws glue delete-database --name alb_access_logs_db --region us-east-1
 aws glue delete-database --name alb_connection_logs_db --region us-east-1
 aws glue delete-database --name alb_health_logs_db --region us-east-1
+aws glue delete-database --name nlb_access_logs_db --region us-east-1
 aws glue delete-database --name acl_traffic_logs_db --region us-east-1
 aws glue delete-database --name bedrock_invocation_logs_db --region {region}
+aws glue delete-database --name vpc_flow_logs_db --region {region}
 
 # Delete S3 buckets
 aws s3 rb s3://cloudfront-logs-{account}-us-east-1 --force
 aws s3 rb s3://alb-logs-{account}-{region} --force
+aws s3 rb s3://nlb-logs-{account}-{region} --force
 aws s3 rb s3://aws-waf-logs-{account}-{region} --force
 aws s3 rb s3://bedrock-invocation-logs-{account}-{region} --force
+aws s3 rb s3://vpc-flow-logs-{account}-{region} --force
 ```
