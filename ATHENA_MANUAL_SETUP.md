@@ -203,6 +203,8 @@ TBLPROPERTIES ('skip.header.line.count'='2');
 
 ### NLB Access Logs
 
+> **Note:** NLB access logs are only generated for TLS listeners. TCP-only NLBs will not produce any logs.
+
 Database: `nlb_access_logs_db`
 Table name: `nlb_{nlb_name}`
 
