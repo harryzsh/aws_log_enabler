@@ -17,6 +17,8 @@ If you need to manually create or recreate Athena databases and tables (e.g., af
 | WAF | `aws-waf-logs-{account_id}-{region}` |
 | Bedrock | `bedrock-invocation-logs-{account_id}-{region}` |
 | VPC Flow Logs | `vpc-flow-logs-{account_id}-{region}` |
+| Transit Gateway Flow Logs | `tgw-flow-logs-{account_id}-{region}` |
+| S3 Access Logs | `s3-access-logs-{account_id}` (shared across regions) |
 
 ---
 
@@ -33,6 +35,8 @@ CREATE DATABASE IF NOT EXISTS alb_health_logs_db;
 CREATE DATABASE IF NOT EXISTS nlb_access_logs_db;
 CREATE DATABASE IF NOT EXISTS acl_traffic_logs_db;
 CREATE DATABASE IF NOT EXISTS bedrock_invocation_logs_db;
+CREATE DATABASE IF NOT EXISTS tgw_flow_logs_db;
+CREATE DATABASE IF NOT EXISTS s3_access_logs_db;
 ```
 
 ---
@@ -444,6 +448,241 @@ TBLPROPERTIES (
   "projection.datehour.interval" = "1",
   "projection.datehour.interval.unit" = "HOURS",
   "storage.location.template" = "s3://bedrock-invocation-logs-476114114317-ap-southeast-2/AWSLogs/476114114317/BedrockModelInvocationLogs/ap-southeast-2/${datehour}"
+);
+```
+
+---
+
+### Transit Gateway Flow Logs
+
+> **Note:** Multicast traffic and Connect attachments are not supported. S3 path uses the same `vpcflowlogs` prefix as VPC flow logs (AWS behavior).
+
+Database: `tgw_flow_logs_db`
+Table name: `tgw_{tgw_id}` (e.g., `tgw_0a1b2c3d4e5f67890`)
+
+Replace:
+- `{bucket_name}` — e.g., `tgw-flow-logs-476114114317-ap-southeast-2`
+- `{account_id}` — e.g., `476114114317`
+- `{region}` — e.g., `ap-southeast-2`
+
+```sql
+CREATE EXTERNAL TABLE IF NOT EXISTS tgw_flow_logs_db.tgw_{tgw_id} (
+  version int,
+  resource_type string,
+  account_id string,
+  tgw_id string,
+  tgw_attachment_id string,
+  tgw_src_vpc_account_id string,
+  tgw_dst_vpc_account_id string,
+  tgw_src_vpc_id string,
+  tgw_dst_vpc_id string,
+  tgw_src_subnet_id string,
+  tgw_dst_subnet_id string,
+  tgw_src_eni string,
+  tgw_dst_eni string,
+  tgw_src_az_id string,
+  tgw_dst_az_id string,
+  tgw_pair_attachment_id string,
+  srcaddr string,
+  dstaddr string,
+  srcport int,
+  dstport int,
+  protocol int,
+  packets bigint,
+  bytes bigint,
+  start bigint,
+  `end` bigint,
+  log_status string,
+  type string,
+  packets_lost_no_route bigint,
+  packets_lost_blackhole bigint,
+  packets_lost_mtu_exceeded bigint,
+  packets_lost_ttl_expired bigint,
+  tcp_flags int,
+  region string,
+  flow_direction string,
+  pkt_src_aws_service string,
+  pkt_dst_aws_service string
+)
+PARTITIONED BY (day string)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ' '
+LOCATION 's3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/'
+TBLPROPERTIES (
+  "skip.header.line.count" = "1",
+  "projection.enabled" = "true",
+  "projection.day.type" = "date",
+  "projection.day.range" = "2026/01/01,NOW",
+  "projection.day.format" = "yyyy/MM/dd",
+  "storage.location.template" = "s3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/${day}"
+);
+```
+
+Example:
+```sql
+CREATE EXTERNAL TABLE IF NOT EXISTS tgw_flow_logs_db.tgw_0a1b2c3d4e5f67890 (
+  version int,
+  resource_type string,
+  account_id string,
+  tgw_id string,
+  tgw_attachment_id string,
+  tgw_src_vpc_account_id string,
+  tgw_dst_vpc_account_id string,
+  tgw_src_vpc_id string,
+  tgw_dst_vpc_id string,
+  tgw_src_subnet_id string,
+  tgw_dst_subnet_id string,
+  tgw_src_eni string,
+  tgw_dst_eni string,
+  tgw_src_az_id string,
+  tgw_dst_az_id string,
+  tgw_pair_attachment_id string,
+  srcaddr string,
+  dstaddr string,
+  srcport int,
+  dstport int,
+  protocol int,
+  packets bigint,
+  bytes bigint,
+  start bigint,
+  `end` bigint,
+  log_status string,
+  type string,
+  packets_lost_no_route bigint,
+  packets_lost_blackhole bigint,
+  packets_lost_mtu_exceeded bigint,
+  packets_lost_ttl_expired bigint,
+  tcp_flags int,
+  region string,
+  flow_direction string,
+  pkt_src_aws_service string,
+  pkt_dst_aws_service string
+)
+PARTITIONED BY (day string)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ' '
+LOCATION 's3://tgw-flow-logs-476114114317-ap-southeast-2/AWSLogs/476114114317/vpcflowlogs/ap-southeast-2/'
+TBLPROPERTIES (
+  "skip.header.line.count" = "1",
+  "projection.enabled" = "true",
+  "projection.day.type" = "date",
+  "projection.day.range" = "2026/01/01,NOW",
+  "projection.day.format" = "yyyy/MM/dd",
+  "storage.location.template" = "s3://tgw-flow-logs-476114114317-ap-southeast-2/AWSLogs/476114114317/vpcflowlogs/ap-southeast-2/${day}"
+);
+```
+
+---
+
+### S3 Access Logs
+
+> **Note:** Uses Hive-compatible partitioned prefix (`EventTime`). Logs land at `s3://{log_bucket}/s3/{source_bucket}/year=YYYY/month=MM/day=DD/`.
+
+Database: `s3_access_logs_db`
+Table name: `s3_access_{source_bucket}` (hyphens replaced with underscores)
+
+Replace:
+- `{source_bucket}` — source bucket name with hyphens replaced by underscores, e.g., `my_source_bucket`
+- `{bucket_name}` — e.g., `s3-access-logs-476114114317`
+
+```sql
+CREATE EXTERNAL TABLE IF NOT EXISTS s3_access_logs_db.s3_access_{source_bucket} (
+  bucket_owner string,
+  bucket string,
+  request_time string,
+  remote_ip string,
+  requester string,
+  request_id string,
+  operation string,
+  key string,
+  request_uri string,
+  http_status int,
+  error_code string,
+  bytes_sent bigint,
+  object_size bigint,
+  total_time int,
+  turn_around_time int,
+  referrer string,
+  user_agent string,
+  version_id string,
+  host_id string,
+  signature_version string,
+  cipher_suite string,
+  authentication_type string,
+  host_header string,
+  tls_version string,
+  access_point_arn string,
+  acl_required string
+)
+PARTITIONED BY (year string, month string, day string)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.RegexSerDe'
+WITH SERDEPROPERTIES (
+  'serialization.format' = '1',
+  'input.regex' = '([^ ]*) ([^ ]*) \[(.*?)\] ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) (\"[^\"]*\"|-) (-|[0-9]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) (\"[^\"]*\"|-) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*)'
+)
+LOCATION 's3://{bucket_name}/s3/{source_bucket}/'
+TBLPROPERTIES (
+  "projection.enabled" = "true",
+  "projection.year.type" = "integer",
+  "projection.year.range" = "2024,2030",
+  "projection.month.type" = "integer",
+  "projection.month.range" = "1,12",
+  "projection.month.digits" = "2",
+  "projection.day.type" = "integer",
+  "projection.day.range" = "1,31",
+  "projection.day.digits" = "2",
+  "storage.location.template" = "s3://{bucket_name}/s3/{source_bucket}/year=${year}/month=${month}/day=${day}"
+);
+```
+
+Example:
+```sql
+CREATE EXTERNAL TABLE IF NOT EXISTS s3_access_logs_db.s3_access_my_source_bucket (
+  bucket_owner string,
+  bucket string,
+  request_time string,
+  remote_ip string,
+  requester string,
+  request_id string,
+  operation string,
+  key string,
+  request_uri string,
+  http_status int,
+  error_code string,
+  bytes_sent bigint,
+  object_size bigint,
+  total_time int,
+  turn_around_time int,
+  referrer string,
+  user_agent string,
+  version_id string,
+  host_id string,
+  signature_version string,
+  cipher_suite string,
+  authentication_type string,
+  host_header string,
+  tls_version string,
+  access_point_arn string,
+  acl_required string
+)
+PARTITIONED BY (year string, month string, day string)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.RegexSerDe'
+WITH SERDEPROPERTIES (
+  'serialization.format' = '1',
+  'input.regex' = '([^ ]*) ([^ ]*) \[(.*?)\] ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) (\"[^\"]*\"|-) (-|[0-9]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) (\"[^\"]*\"|-) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*)'
+)
+LOCATION 's3://s3-access-logs-476114114317/s3/my-source-bucket/'
+TBLPROPERTIES (
+  "projection.enabled" = "true",
+  "projection.year.type" = "integer",
+  "projection.year.range" = "2024,2030",
+  "projection.month.type" = "integer",
+  "projection.month.range" = "1,12",
+  "projection.month.digits" = "2",
+  "projection.day.type" = "integer",
+  "projection.day.range" = "1,31",
+  "projection.day.digits" = "2",
+  "storage.location.template" = "s3://s3-access-logs-476114114317/s3/my-source-bucket/year=${year}/month=${month}/day=${day}"
 );
 ```
 

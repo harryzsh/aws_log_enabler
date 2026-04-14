@@ -139,6 +139,19 @@ The user/role running this script needs the following IAM permissions:
 }
 ```
 
+### Transit Gateway Flow Logs Permissions
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "ec2:CreateFlowLogs",
+    "ec2:DescribeFlowLogs",
+    "logs:CreateLogDelivery"
+  ],
+  "Resource": "*"
+}
+```
+
 ### WAF Permissions
 ```json
 {
@@ -365,6 +378,35 @@ vpc:
 - Athena table uses daily partition projection for efficient querying
 - S3 path: `{bucket}/AWSLogs/{account}/vpcflowlogs/{region}/{yyyy}/{MM}/{dd}/`
 
+### Transit Gateway Flow Logs
+
+```yaml
+tgw:
+  - tgw_id: tgw-xxxxxxxxxxxxxxxxx
+    region: ap-southeast-2
+```
+
+**Notes:**
+- Captures all IP traffic traversing the Transit Gateway
+- Multicast traffic and Connect attachments are not supported
+- Logs appear within 10 minutes (600s aggregation interval)
+- Athena table uses daily partition projection for efficient querying
+- S3 path: `{bucket}/AWSLogs/{account}/vpcflowlogs/{region}/{yyyy}/{MM}/{dd}/`
+
+### S3 Access Logs
+
+```yaml
+s3:
+  - bucket: my-source-bucket
+```
+
+**Notes:**
+- Region is auto-detected from the source bucket — no need to specify it
+- Logs delivered to `s3-access-logs-{account_id}` (shared across all regions)
+- Uses Hive-compatible partitioned prefix (`year=YYYY/month=MM/day=DD`) for efficient Athena queries
+- Log delivery is best-effort — can be delayed by several hours
+- No extra charge for enabling S3 server access logging
+
 ## S3 Bucket Naming
 
 Buckets are created with region suffix to support multi-region deployments:
@@ -374,6 +416,8 @@ Buckets are created with region suffix to support multi-region deployments:
 - WAF: `aws-waf-logs-{account-id}-{region}`
 - Bedrock: `bedrock-invocation-logs-{account-id}-{region}`
 - VPC Flow Logs: `vpc-flow-logs-{account-id}-{region}`
+- Transit Gateway Flow Logs: `tgw-flow-logs-{account-id}-{region}`
+- S3 Access Logs: `s3-access-logs-{account-id}` (shared, no region suffix)
 
 ### Multi-Resource Sharing
 
@@ -402,6 +446,8 @@ The script creates separate databases for each log type:
 - `acl_traffic_logs_db` - WAF traffic logs
 - `bedrock_invocation_logs_db` - Bedrock model invocation logs
 - `vpc_flow_logs_db` - VPC Flow Logs
+- `tgw_flow_logs_db` - Transit Gateway Flow Logs
+- `s3_access_logs_db` - S3 server access logs
 
 ## Query Examples
 
@@ -545,7 +591,76 @@ GROUP BY modelId
 ORDER BY invocation_count DESC;
 ```
 
-## Important Notes
+### Transit Gateway Flow Logs
+```sql
+-- Recent traffic through the TGW
+SELECT
+  to_iso8601(from_unixtime(start)) as time,
+  srcaddr, dstaddr, srcport, dstport, protocol,
+  packets, bytes, flow_direction,
+  tgw_src_vpc_id, tgw_dst_vpc_id
+FROM tgw_flow_logs_db.tgw_{tgw_id}
+WHERE day >= '2026/01/01'
+ORDER BY start DESC
+LIMIT 100;
+
+-- Dropped packets analysis
+SELECT
+  to_iso8601(from_unixtime(start)) as time,
+  srcaddr, dstaddr, dstport,
+  packets_lost_no_route,
+  packets_lost_blackhole,
+  packets_lost_mtu_exceeded,
+  packets_lost_ttl_expired
+FROM tgw_flow_logs_db.tgw_{tgw_id}
+WHERE day >= '2026/01/01'
+  AND (packets_lost_no_route > 0
+    OR packets_lost_blackhole > 0
+    OR packets_lost_mtu_exceeded > 0
+    OR packets_lost_ttl_expired > 0)
+ORDER BY start DESC
+LIMIT 100;
+
+-- Top cross-VPC traffic flows
+SELECT
+  tgw_src_vpc_id, tgw_dst_vpc_id,
+  srcaddr, dstaddr,
+  SUM(bytes) as total_bytes,
+  SUM(packets) as total_packets
+FROM tgw_flow_logs_db.tgw_{tgw_id}
+WHERE day >= '2026/01/01'
+GROUP BY tgw_src_vpc_id, tgw_dst_vpc_id, srcaddr, dstaddr
+ORDER BY total_bytes DESC
+LIMIT 20;
+```
+
+### S3 Access Logs
+```sql
+-- Recent requests to a bucket
+SELECT
+  bucket, request_time, remote_ip, requester,
+  operation, key, http_status, error_code, bytes_sent
+FROM s3_access_logs_db.s3_access_{bucket_name}
+WHERE year = '2026' AND month = '04'
+ORDER BY request_time DESC
+LIMIT 100;
+
+-- Top error codes
+SELECT error_code, COUNT(*) as count
+FROM s3_access_logs_db.s3_access_{bucket_name}
+WHERE year = '2026' AND month = '04'
+  AND error_code != '-'
+GROUP BY error_code
+ORDER BY count DESC;
+
+-- Top requesters by bytes downloaded
+SELECT requester, SUM(bytes_sent) as total_bytes
+FROM s3_access_logs_db.s3_access_{bucket_name}
+WHERE year = '2026' AND month = '04'
+GROUP BY requester
+ORDER BY total_bytes DESC
+LIMIT 20;
+```
 
 ### Script Behavior
 - **Idempotent**: Safe to run multiple times - detects existing resources
@@ -578,6 +693,17 @@ ORDER BY invocation_count DESC;
 - **Data types**: Captures text, image, video, and embedding data (all enabled by default)
 - **Partition projection**: Uses hourly partitioning with automatic date range projection
 - **Query performance**: Partition projection eliminates need for manual partition management
+
+### Transit Gateway Limitations
+- **Multicast traffic**: Not supported
+- **Connect attachments**: Not supported — Connect flow logs appear under the transport attachment
+- **Log delay**: Logs appear within 10 minutes (600s aggregation interval)
+- **S3 path**: Shares the `vpcflowlogs` S3 prefix with VPC flow logs (AWS behavior)
+
+### S3 Access Log Limitations
+- **Delivery**: Best-effort, logs can be delayed by several hours
+- **No partitioning by default**: This script uses Hive-compatible partitioned prefix (`EventTime`) for Athena efficiency
+- **Logging loop**: The log target bucket itself is excluded from logging automatically by AWS
 
 ### Multi-Region Deployments
 - Each region gets its own S3 bucket (e.g., `alb-logs-{account}-us-east-1`, `alb-logs-{account}-ap-southeast-2`)
@@ -631,6 +757,7 @@ aws glue delete-database --name nlb_access_logs_db --region us-east-1
 aws glue delete-database --name acl_traffic_logs_db --region us-east-1
 aws glue delete-database --name bedrock_invocation_logs_db --region {region}
 aws glue delete-database --name vpc_flow_logs_db --region {region}
+aws glue delete-database --name tgw_flow_logs_db --region {region}
 
 # Delete S3 buckets
 aws s3 rb s3://cloudfront-logs-{account}-us-east-1 --force
@@ -639,4 +766,5 @@ aws s3 rb s3://nlb-logs-{account}-{region} --force
 aws s3 rb s3://aws-waf-logs-{account}-{region} --force
 aws s3 rb s3://bedrock-invocation-logs-{account}-{region} --force
 aws s3 rb s3://vpc-flow-logs-{account}-{region} --force
+aws s3 rb s3://tgw-flow-logs-{account}-{region} --force
 ```

@@ -382,6 +382,168 @@ def setup_vpc_flow_logs(vpc_id, bucket_name, region):
     print(f"S3 location: s3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/")
     return vpc_id
 
+def setup_s3_access_logging(source_bucket, log_bucket_name):
+    """
+    Enable S3 server access logging with Hive-compatible partitioned prefix.
+
+    Uses PartitionedPrefix with EventTime so logs land at:
+    {log_bucket}/s3/{source_bucket}/year=YYYY/month=MM/day=DD/
+
+    Grants access via bucket policy (recommended). New buckets default to
+    BucketOwnerEnforced which disables ACLs — bucket policy is the correct approach.
+    """
+    # Detect region from source bucket
+    s3_global = boto3.client('s3')
+    location = s3_global.get_bucket_location(Bucket=source_bucket)
+    region = location['LocationConstraint'] or 'us-east-1'
+
+    s3 = boto3.client('s3', region_name=region)
+    account_id = boto3.client('sts').get_caller_identity()['Account']
+
+    # Create target log bucket
+    create_s3_bucket(s3, log_bucket_name, region, 's3_logs')
+
+    # Grant logging service principal access via bucket policy (no ACL needed)
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "logging.s3.amazonaws.com"},
+            "Action": "s3:PutObject",
+            "Resource": f"arn:aws:s3:::{log_bucket_name}/s3/{source_bucket}/*",
+            "Condition": {
+                "StringEquals": {"aws:SourceAccount": account_id},
+                "ArnLike": {"aws:SourceArn": f"arn:aws:s3:::{source_bucket}"}
+            }
+        }]
+    }
+    s3.put_bucket_policy(Bucket=log_bucket_name, Policy=str(policy).replace("'", '"'))
+
+    # Check if logging already enabled to this target
+    current = s3.get_bucket_logging(Bucket=source_bucket)
+    existing = current.get('LoggingEnabled', {})
+    if existing.get('TargetBucket') == log_bucket_name:
+        print(f"S3 access logging {RED}already{RESET} enabled for {source_bucket}")
+        print(f"S3 location: s3://{log_bucket_name}/s3/{source_bucket}/")
+        return source_bucket, region
+
+    # Enable logging with Hive-compatible partitioned prefix
+    s3.put_bucket_logging(
+        Bucket=source_bucket,
+        BucketLoggingStatus={
+            'LoggingEnabled': {
+                'TargetBucket': log_bucket_name,
+                'TargetPrefix': f's3/{source_bucket}/',
+                'TargetObjectKeyFormat': {
+                    'PartitionedPrefix': {
+                        'PartitionDateSource': 'EventTime'
+                    }
+                }
+            }
+        }
+    )
+
+    print(f"Enabled S3 access logging for {source_bucket}")
+    print(f"S3 location: s3://{log_bucket_name}/s3/{source_bucket}/")
+    return source_bucket, region
+
+    # Check if logging already enabled to this target
+    current = s3.get_bucket_logging(Bucket=source_bucket)
+    existing = current.get('LoggingEnabled', {})
+    if existing.get('TargetBucket') == log_bucket_name:
+        print(f"S3 access logging {RED}already{RESET} enabled for {source_bucket}")
+        print(f"S3 location: s3://{log_bucket_name}/s3/{source_bucket}/")
+        return source_bucket, region
+
+    # Enable logging with Hive-compatible partitioned prefix
+    s3.put_bucket_logging(
+        Bucket=source_bucket,
+        BucketLoggingStatus={
+            'LoggingEnabled': {
+                'TargetBucket': log_bucket_name,
+                'TargetPrefix': f's3/{source_bucket}/',
+                'TargetObjectKeyFormat': {
+                    'PartitionedPrefix': {
+                        'PartitionDateSource': 'EventTime'
+                    }
+                }
+            }
+        }
+    )
+
+    print(f"Enabled S3 access logging for {source_bucket}")
+    print(f"S3 location: s3://{log_bucket_name}/s3/{source_bucket}/")
+    return source_bucket, region
+
+def setup_tgw_flow_logs(tgw_id, bucket_name, region):
+    """
+    Enable Transit Gateway Flow Logs to S3.
+
+    S3 path: {bucket}/AWSLogs/{account}/vpcflowlogs/{region}/{yyyy}/{MM}/{dd}/
+    Note: Multicast traffic and Connect attachments are not supported.
+    Uses delivery.logs.amazonaws.com service principal (same as VPC flow logs).
+    """
+    ec2 = boto3.client('ec2', region_name=region)
+    s3 = boto3.client('s3', region_name=region)
+    account_id = boto3.client('sts').get_caller_identity()['Account']
+
+    # Check if flow logs already enabled for this TGW to this bucket
+    existing = ec2.describe_flow_logs(
+        Filters=[
+            {'Name': 'resource-id', 'Values': [tgw_id]},
+            {'Name': 'log-destination-type', 'Values': ['s3']}
+        ]
+    )
+    for fl in existing.get('FlowLogs', []):
+        if bucket_name in fl.get('LogDestination', ''):
+            print(f"TGW Flow Logs {RED}already{RESET} enabled for {tgw_id}")
+            print(f"S3 location: s3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/")
+            return tgw_id
+
+    # Set bucket policy for TGW Flow Logs
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": "delivery.logs.amazonaws.com"},
+                "Action": "s3:PutObject",
+                "Resource": f"arn:aws:s3:::{bucket_name}/AWSLogs/{account_id}/*",
+                "Condition": {
+                    "StringEquals": {
+                        "s3:x-amz-acl": "bucket-owner-full-control",
+                        "aws:SourceAccount": account_id
+                    }
+                }
+            },
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": "delivery.logs.amazonaws.com"},
+                "Action": "s3:GetBucketAcl",
+                "Resource": f"arn:aws:s3:::{bucket_name}",
+                "Condition": {
+                    "StringEquals": {"aws:SourceAccount": account_id}
+                }
+            }
+        ]
+    }
+    s3.put_bucket_policy(Bucket=bucket_name, Policy=str(policy).replace("'", '"'))
+
+    # Enable TGW Flow Logs with all version 6 fields
+    ec2.create_flow_logs(
+        ResourceIds=[tgw_id],
+        ResourceType='TransitGateway',
+        LogDestinationType='s3',
+        LogDestination=f'arn:aws:s3:::{bucket_name}',
+        LogFormat='${version} ${resource-type} ${account-id} ${tgw-id} ${tgw-attachment-id} ${tgw-src-vpc-account-id} ${tgw-dst-vpc-account-id} ${tgw-src-vpc-id} ${tgw-dst-vpc-id} ${tgw-src-subnet-id} ${tgw-dst-subnet-id} ${tgw-src-eni} ${tgw-dst-eni} ${tgw-src-az-id} ${tgw-dst-az-id} ${tgw-pair-attachment-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${log-status} ${type} ${packets-lost-no-route} ${packets-lost-blackhole} ${packets-lost-mtu-exceeded} ${packets-lost-ttl-expired} ${tcp-flags} ${region} ${flow-direction} ${pkt-src-aws-service} ${pkt-dst-aws-service}',
+        MaxAggregationInterval=60
+    )
+
+    print(f"Enabled TGW Flow Logs for {tgw_id}")
+    print(f"S3 location: s3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/")
+    return tgw_id
+
+
 def setup_bedrock_logging(region, bucket_name):
     """
     Enable Bedrock model invocation logging to S3.
@@ -472,7 +634,9 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name, drop_
         'waf': 'acl_traffic_logs_db',
         'bedrock': 'bedrock_invocation_logs_db',
         'nlb': 'nlb_access_logs_db',
-        'vpc': 'vpc_flow_logs_db'
+        'vpc': 'vpc_flow_logs_db',
+        'tgw': 'tgw_flow_logs_db',
+        's3_access': 's3_access_logs_db'
     }
     
     db_name = db_name_map.get(service_type, f'{service_type}_logs_db')
@@ -629,6 +793,59 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name, drop_
           "storage.location.template" = "s3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/${{day}}"
         );
         """
+    elif service_type == 'tgw':
+        create_table = f"""
+        CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (
+          version int,
+          resource_type string,
+          account_id string,
+          tgw_id string,
+          tgw_attachment_id string,
+          tgw_src_vpc_account_id string,
+          tgw_dst_vpc_account_id string,
+          tgw_src_vpc_id string,
+          tgw_dst_vpc_id string,
+          tgw_src_subnet_id string,
+          tgw_dst_subnet_id string,
+          tgw_src_eni string,
+          tgw_dst_eni string,
+          tgw_src_az_id string,
+          tgw_dst_az_id string,
+          tgw_pair_attachment_id string,
+          srcaddr string,
+          dstaddr string,
+          srcport int,
+          dstport int,
+          protocol int,
+          packets bigint,
+          bytes bigint,
+          start bigint,
+          `end` bigint,
+          log_status string,
+          type string,
+          packets_lost_no_route bigint,
+          packets_lost_blackhole bigint,
+          packets_lost_mtu_exceeded bigint,
+          packets_lost_ttl_expired bigint,
+          tcp_flags int,
+          region string,
+          flow_direction string,
+          pkt_src_aws_service string,
+          pkt_dst_aws_service string
+        )
+        PARTITIONED BY (day string)
+        ROW FORMAT DELIMITED
+        FIELDS TERMINATED BY ' '
+        LOCATION 's3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/'
+        TBLPROPERTIES (
+          "skip.header.line.count" = "1",
+          "projection.enabled" = "true",
+          "projection.day.type" = "date",
+          "projection.day.range" = "2026/01/01,NOW",
+          "projection.day.format" = "yyyy/MM/dd",
+          "storage.location.template" = "s3://{bucket_name}/AWSLogs/{account_id}/vpcflowlogs/{region}/${{day}}"
+        );
+        """
     elif service_type == 'bedrock':
         create_table = f"""        CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (
           schemaType STRING,
@@ -674,6 +891,56 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name, drop_
           "projection.datehour.interval" = "1",
           "projection.datehour.interval.unit" = "HOURS",
           "storage.location.template" = "s3://{bucket_name}/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/${{datehour}}"
+        );
+        """
+    elif service_type == 's3_access':
+        create_table = f"""
+        CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (
+          bucket_owner string,
+          bucket string,
+          request_time string,
+          remote_ip string,
+          requester string,
+          request_id string,
+          operation string,
+          key string,
+          request_uri string,
+          http_status int,
+          error_code string,
+          bytes_sent bigint,
+          object_size bigint,
+          total_time int,
+          turn_around_time int,
+          referrer string,
+          user_agent string,
+          version_id string,
+          host_id string,
+          signature_version string,
+          cipher_suite string,
+          authentication_type string,
+          host_header string,
+          tls_version string,
+          access_point_arn string,
+          acl_required string
+        )
+        PARTITIONED BY (year string, month string, day string)
+        ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.RegexSerDe'
+        WITH SERDEPROPERTIES (
+          'serialization.format' = '1',
+          'input.regex' = '([^ ]*) ([^ ]*) \\[(.*?)\\] ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) (\"[^\"]*\"|-) (-|[0-9]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) (\"[^\"]*\"|-) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*) ([^ ]*)'
+        )
+        LOCATION 's3://{bucket_name}/s3/{resource_name}/'
+        TBLPROPERTIES (
+          "projection.enabled" = "true",
+          "projection.year.type" = "integer",
+          "projection.year.range" = "2024,2030",
+          "projection.month.type" = "integer",
+          "projection.month.range" = "1,12",
+          "projection.month.digits" = "2",
+          "projection.day.type" = "integer",
+          "projection.day.range" = "1,31",
+          "projection.day.digits" = "2",
+          "storage.location.template" = "s3://{bucket_name}/s3/{resource_name}/year=${{year}}/month=${{month}}/day=${{day}}"
         );
         """
     else:  # waf
@@ -850,6 +1117,40 @@ def process_yaml_config(yaml_file):
         except Exception as e:
             results['failed'].append(f"VPC {vpc_id}: {str(e)}")
             print(f"✗ VPC {vpc_id} failed: {e}\n")
+
+    # Process S3 Access Logs
+    for s3_config in config.get('s3', []):
+        source_bucket = s3_config['bucket']
+        try:
+            log_bucket_name = f's3-access-logs-{account_id}'
+            # detect region inside setup_s3_access_logging
+            resource_name, region = setup_s3_access_logging(source_bucket, log_bucket_name)
+            setup_athena(log_bucket_name, '', 's3_access', region, source_bucket.replace('-', '_'))
+
+            results['success'].append(f"S3 {source_bucket}")
+            print(f"✓ S3 {source_bucket} completed\n")
+        except Exception as e:
+            results['failed'].append(f"S3 {source_bucket}: {str(e)}")
+            print(f"✗ S3 {source_bucket} failed: {e}\n")
+
+    # Process Transit Gateway Flow Logs
+    for tgw_config in config.get('tgw', []):
+        try:
+            tgw_id = tgw_config['tgw_id']
+            region = tgw_config['region']
+
+            bucket_name = f'tgw-flow-logs-{account_id}-{region}'
+            s3 = boto3.client('s3', region_name=region)
+            create_s3_bucket(s3, bucket_name, region, 'tgw')
+
+            resource_name = setup_tgw_flow_logs(tgw_id, bucket_name, region)
+            setup_athena(bucket_name, '', 'tgw', region, tgw_id.replace('-', '_')[4:])
+
+            results['success'].append(f"TGW {tgw_id}")
+            print(f"✓ TGW {tgw_id} completed\n")
+        except Exception as e:
+            results['failed'].append(f"TGW {tgw_id}: {str(e)}")
+            print(f"✗ TGW {tgw_id} failed: {e}\n")
 
     return results
 
