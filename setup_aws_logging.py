@@ -848,40 +848,27 @@ def setup_athena(bucket_name, prefix, service_type, region, resource_name, drop_
         """
     elif service_type == 'bedrock':
         create_table = f"""        CREATE EXTERNAL TABLE IF NOT EXISTS {db_name}.{table_name} (
-          schemaType STRING,
-          timestamp TIMESTAMP,
-          region STRING,
-          identity STRUCT<arn: STRING>,
-          operation STRING,
-          modelId STRING,
-          requestId STRING,
-          schemaVersion STRING,
-          output STRUCT<
-            outputTokenCount: INT,
-            outputBodyJson: STRUCT<
-              metrics: STRUCT<latencyMs: INT>,
-              usage: STRUCT<inputTokens: INT, outputTokens: INT, totalTokens: INT>,
-              output: STRUCT<
-                message: STRUCT<
-                  role: STRING,
-                  content: ARRAY<STRUCT<text: STRING>>
-                >
-              >
-            >
-          >,
-          input STRUCT<
-            inputTokenCount: INT,
-            inputBodyJson: STRUCT<
-              messages: ARRAY<STRUCT<role: STRING, content: ARRAY<STRUCT<text: STRING>>>>,
-              system: ARRAY<STRUCT<text: STRING>>,
-              inferenceConfig: STRUCT<maxTokens: INT, temperature: DOUBLE, topP: DOUBLE>,
-              additionalModelRequestFields: STRUCT<top_k: INT>
-            >
-          >
+          schemaType      STRING,
+          `timestamp`     STRING,
+          region          STRING,
+          identity        STRING,
+          operation       STRING,
+          modelId         STRING,
+          requestId       STRING,
+          schemaVersion   STRING,
+          output          STRING,
+          input           STRING,
+          inferenceRegion STRING,
+          errorCode       STRING
         )
         PARTITIONED BY (datehour STRING)
         ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
-        WITH SERDEPROPERTIES ('serialization.format' = '1')
+        WITH SERDEPROPERTIES (
+          'serialization.format' = '1',
+          'ignore.malformed.json' = 'true',
+          'dots.in.keys' = 'true',
+          'case.insensitive' = 'true'
+        )
         LOCATION 's3://{bucket_name}/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/'
         TBLPROPERTIES (
           "projection.enabled" = "true",
