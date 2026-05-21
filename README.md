@@ -539,52 +539,56 @@ ORDER BY total_bytes DESC
 LIMIT 10;
 ```
 ### Bedrock Logs
+
+> Schema notes: `timestamp`, `input`, and `output` are stored as `STRING` so the table tolerates streaming responses and extended-thinking chunks. Use `from_iso8601_timestamp()` and `json_extract_scalar()` for typed access.
+
 ```sql
 -- Query recent invocations with token usage
-SELECT 
-  timestamp,
+SELECT
+  from_iso8601_timestamp("timestamp")                                              AS ts,
   modelId,
   operation,
-  input.inputTokenCount as input_tokens,
-  output.outputTokenCount as output_tokens,
-  output.outputBodyJson.metrics.latencyMs as latency_ms
+  CAST(json_extract_scalar(input,  '$.inputTokenCount')  AS INT)                   AS input_tokens,
+  CAST(json_extract_scalar(output, '$.outputTokenCount') AS INT)                   AS output_tokens,
+  CAST(json_extract_scalar(output, '$.outputBodyJson.metrics.latencyMs') AS INT)   AS latency_ms
 FROM bedrock_invocation_logs_db.bedrock_invocation_logs
 WHERE datehour >= '2026/01/12/00'
-ORDER BY timestamp DESC
+ORDER BY ts DESC
 LIMIT 100;
 
 -- Extract conversation details (system prompt, user input, assistant output)
 SELECT
-  timestamp,
-  input.inputBodyJson.system[1].text as system_prompt,
-  input.inputBodyJson.messages[1].content[1].text as user_input,
-  output.outputBodyJson.output.message.content[1].text as assistant_output,
-  output.outputBodyJson.metrics.latencyMs as latency_ms,
-  input.inputTokenCount as input_tokens,
-  output.outputTokenCount as output_tokens
+  from_iso8601_timestamp("timestamp")                                                                                AS ts,
+  json_extract_scalar(input,  '$.inputBodyJson.system[0].text')                                                      AS system_prompt,
+  json_extract_scalar(input,  '$.inputBodyJson.messages[0].content[0].text')                                         AS user_input,
+  json_extract_scalar(output, '$.outputBodyJson.output.message.content[0].text')                                     AS assistant_output,
+  CAST(json_extract_scalar(output, '$.outputBodyJson.metrics.latencyMs') AS INT)                                     AS latency_ms,
+  CAST(json_extract_scalar(input,  '$.inputTokenCount')  AS INT)                                                     AS input_tokens,
+  CAST(json_extract_scalar(output, '$.outputTokenCount') AS INT)                                                     AS output_tokens
 FROM bedrock_invocation_logs_db.bedrock_invocation_logs
 WHERE datehour >= '2026/01/12/00'
-ORDER BY timestamp DESC
+  AND operation IN ('Converse', 'InvokeModel')   -- non-streaming only; streaming output is an event array
+ORDER BY ts DESC
 LIMIT 100;
 
 -- Find high-latency requests
-SELECT 
-  timestamp,
+SELECT
+  from_iso8601_timestamp("timestamp")                                              AS ts,
   modelId,
-  output.outputBodyJson.metrics.latencyMs as latency_ms,
+  CAST(json_extract_scalar(output, '$.outputBodyJson.metrics.latencyMs') AS INT)   AS latency_ms,
   requestId
 FROM bedrock_invocation_logs_db.bedrock_invocation_logs
 WHERE datehour >= '2026/01/12/00'
-  AND output.outputBodyJson.metrics.latencyMs > 5000
+  AND CAST(json_extract_scalar(output, '$.outputBodyJson.metrics.latencyMs') AS INT) > 5000
 ORDER BY latency_ms DESC;
 
 -- Analyze token usage by model
-SELECT 
+SELECT
   modelId,
-  COUNT(*) as invocation_count,
-  SUM(input.inputTokenCount) as total_input_tokens,
-  SUM(output.outputTokenCount) as total_output_tokens,
-  AVG(output.outputBodyJson.metrics.latencyMs) as avg_latency_ms
+  COUNT(*)                                                                         AS invocation_count,
+  SUM(CAST(json_extract_scalar(input,  '$.inputTokenCount')  AS INT))              AS total_input_tokens,
+  SUM(CAST(json_extract_scalar(output, '$.outputTokenCount') AS INT))              AS total_output_tokens,
+  AVG(CAST(json_extract_scalar(output, '$.outputBodyJson.metrics.latencyMs') AS INT)) AS avg_latency_ms
 FROM bedrock_invocation_logs_db.bedrock_invocation_logs
 WHERE datehour >= '2026/01/12/00'
 GROUP BY modelId

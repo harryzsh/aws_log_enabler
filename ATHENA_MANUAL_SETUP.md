@@ -374,32 +374,31 @@ Replace:
 - `{account_id}` — e.g., `476114114317`
 - `{region}` — e.g., `ap-southeast-2`
 
+> **Note:** This schema uses permissive `STRING` columns for `input`, `output`, `identity`, and `timestamp` so it can ingest both standard `Converse` / `InvokeModel` payloads and streaming responses with extended thinking (`ConverseStream`, `InvokeModelWithResponseStream`). Use `json_extract_scalar()` / `from_iso8601_timestamp()` at query time for typed access. See sample queries in `README.md`.
+
 ```sql
 CREATE EXTERNAL TABLE IF NOT EXISTS bedrock_invocation_logs_db.bedrock_invocation_logs (
-  schemaType STRING, timestamp TIMESTAMP, region STRING,
-  identity STRUCT<arn: STRING>, operation STRING, modelId STRING,
-  requestId STRING, schemaVersion STRING,
-  output STRUCT<
-    outputTokenCount: INT,
-    outputBodyJson: STRUCT<
-      metrics: STRUCT<latencyMs: INT>,
-      usage: STRUCT<inputTokens: INT, outputTokens: INT, totalTokens: INT>,
-      output: STRUCT<message: STRUCT<role: STRING, content: ARRAY<STRUCT<text: STRING>>>>
-    >
-  >,
-  input STRUCT<
-    inputTokenCount: INT,
-    inputBodyJson: STRUCT<
-      messages: ARRAY<STRUCT<role: STRING, content: ARRAY<STRUCT<text: STRING>>>>,
-      system: ARRAY<STRUCT<text: STRING>>,
-      inferenceConfig: STRUCT<maxTokens: INT, temperature: DOUBLE, topP: DOUBLE>,
-      additionalModelRequestFields: STRUCT<top_k: INT>
-    >
-  >
+  schemaType      STRING,
+  `timestamp`     STRING,
+  region          STRING,
+  identity        STRING,
+  operation       STRING,
+  modelId         STRING,
+  requestId       STRING,
+  schemaVersion   STRING,
+  output          STRING,
+  input           STRING,
+  inferenceRegion STRING,
+  errorCode       STRING
 )
 PARTITIONED BY (datehour STRING)
 ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
-WITH SERDEPROPERTIES ('serialization.format' = '1')
+WITH SERDEPROPERTIES (
+  'serialization.format' = '1',
+  'ignore.malformed.json' = 'true',
+  'dots.in.keys' = 'true',
+  'case.insensitive' = 'true'
+)
 LOCATION 's3://{bucket_name}/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/'
 TBLPROPERTIES (
   "projection.enabled" = "true",
@@ -415,30 +414,27 @@ TBLPROPERTIES (
 Example:
 ```sql
 CREATE EXTERNAL TABLE IF NOT EXISTS bedrock_invocation_logs_db.bedrock_invocation_logs (
-  schemaType STRING, timestamp TIMESTAMP, region STRING,
-  identity STRUCT<arn: STRING>, operation STRING, modelId STRING,
-  requestId STRING, schemaVersion STRING,
-  output STRUCT<
-    outputTokenCount: INT,
-    outputBodyJson: STRUCT<
-      metrics: STRUCT<latencyMs: INT>,
-      usage: STRUCT<inputTokens: INT, outputTokens: INT, totalTokens: INT>,
-      output: STRUCT<message: STRUCT<role: STRING, content: ARRAY<STRUCT<text: STRING>>>>
-    >
-  >,
-  input STRUCT<
-    inputTokenCount: INT,
-    inputBodyJson: STRUCT<
-      messages: ARRAY<STRUCT<role: STRING, content: ARRAY<STRUCT<text: STRING>>>>,
-      system: ARRAY<STRUCT<text: STRING>>,
-      inferenceConfig: STRUCT<maxTokens: INT, temperature: DOUBLE, topP: DOUBLE>,
-      additionalModelRequestFields: STRUCT<top_k: INT>
-    >
-  >
+  schemaType      STRING,
+  `timestamp`     STRING,
+  region          STRING,
+  identity        STRING,
+  operation       STRING,
+  modelId         STRING,
+  requestId       STRING,
+  schemaVersion   STRING,
+  output          STRING,
+  input           STRING,
+  inferenceRegion STRING,
+  errorCode       STRING
 )
 PARTITIONED BY (datehour STRING)
 ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
-WITH SERDEPROPERTIES ('serialization.format' = '1')
+WITH SERDEPROPERTIES (
+  'serialization.format' = '1',
+  'ignore.malformed.json' = 'true',
+  'dots.in.keys' = 'true',
+  'case.insensitive' = 'true'
+)
 LOCATION 's3://bedrock-invocation-logs-476114114317-ap-southeast-2/AWSLogs/476114114317/BedrockModelInvocationLogs/ap-southeast-2/'
 TBLPROPERTIES (
   "projection.enabled" = "true",
@@ -449,6 +445,13 @@ TBLPROPERTIES (
   "projection.datehour.interval.unit" = "HOURS",
   "storage.location.template" = "s3://bedrock-invocation-logs-476114114317-ap-southeast-2/AWSLogs/476114114317/BedrockModelInvocationLogs/ap-southeast-2/${datehour}"
 );
+```
+
+**Migrating an existing strongly-typed table?** Either drop and recreate with the schema above, or apply this stopgap to make malformed rows null out instead of failing the whole query (note: this also masks legitimate data quality issues — see the [OpenX JSON SerDe docs](https://docs.aws.amazon.com/athena/latest/ug/openx-json-serde.html)):
+
+```sql
+ALTER TABLE bedrock_invocation_logs_db.bedrock_invocation_logs
+SET TBLPROPERTIES ('use.null.for.invalid.data' = 'true');
 ```
 
 ---
